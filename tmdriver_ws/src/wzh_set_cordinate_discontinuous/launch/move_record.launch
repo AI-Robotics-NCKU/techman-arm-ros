@@ -1,0 +1,4 @@
+<launch>
+    <node name="position_sub" pkg="wzh_set_cordinate_discontinuous" type="position_to_excel_sub.py" />
+    <node name="SetPositionClient" pkg="wzh_set_cordinate_discontinuous" type="wzh_set_cordinate_discontinuous" />
+</launch>

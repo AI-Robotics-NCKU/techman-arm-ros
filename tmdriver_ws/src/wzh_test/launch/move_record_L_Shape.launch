@@ -1,0 +1,4 @@
+<launch>
+    <node name="position_sub" pkg="wzh_test" type="position_to_excel_sub.py" />
+    <node name="SetPositionClientArray" pkg="wzh_test" type="send_script_cordinate_array" />
+</launch>

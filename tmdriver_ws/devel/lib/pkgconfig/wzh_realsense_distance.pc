@@ -1,0 +1,8 @@
+prefix=/home/leo/tmdriver_ws/devel
+
+Name: wzh_realsense_distance
+Description: Description of wzh_realsense_distance
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

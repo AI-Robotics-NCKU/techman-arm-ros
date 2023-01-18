@@ -1,0 +1,226 @@
+"""
+head pose estimation using mediapipe/dlib_68_shape/
+"""
+# 匯入必要套件
+
+import cv2
+import time
+import numpy as np
+import mediapipe as mp
+from sys import exit
+import pyrealsense2 as rs
+import rospy
+from std_msgs.msg import String
+from wzh_test.msg import vision
+
+
+# --------------------------------自定義 .py 檔
+import os 
+import sys
+path = os.path.abspath(".")
+sys.path.insert(0, path + "/src/wzh_test/scripts")
+import realsense_depth2
+import drawTable
+import rotationMatrixToEulerAngles
+import drawAxis
+import stabilizer_parameters
+
+
+
+
+
+# -------------------------------- constant varaiable
+drawTableOpen = 1 # 0/1: open/close draw
+dc = realsense_depth2.DepthCamera()
+face_landmarks_id_mp = [130,359,1,76,306,175] 
+
+
+class FaceDetector():
+    def __init__(self, minDetectionCon = 0.8 ):
+        self.minDetectionCon = minDetectionCon
+        self.mpFaceDetection = mp.solutions.face_detection
+        self.faceDetection = self.mpFaceDetection.FaceDetection(self.minDetectionCon)
+
+    def findFace(self, frame, draw = True):
+        self.h, self.w, self.c = frame.shape
+        self.imRGB = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self.result = self.faceDetection.process(self.imRGB)
+        self.bboxs = []
+        if self.result.detections:
+            for id,detection in enumerate(self.result.detections):
+                self.bboxC = detection.location_data.relative_bounding_box
+                self.bbox = int(self.bboxC.xmin * self.w), int(self.bboxC.ymin * self.h), \
+                            int(self.bboxC.width * self.w), int(self.bboxC.height * self.h)
+                self.bboxs.append([self.bbox, detection.score])
+
+                cv2.rectangle(frame, self.bbox, (0, 255, 0), 2)
+                cv2.putText(frame, f'{int(detection.score[0] * 100)}%', (self.bbox[0], self.bbox[1] - 20), cv2.FONT_HERSHEY_PLAIN, 1, (255, 0, 0), 2)
+        return frame, self.bboxs
+
+class LandMarkDetector():
+    def __init__(self, face_landmarks_id_mp):
+        self.mpFaceMesh = mp.solutions.face_mesh
+        self.faceMesh = self.mpFaceMesh.FaceMesh(max_num_faces = 2)
+        self.face_landmarks_id_mp = face_landmarks_id_mp
+
+    def findLandMark(self, frame):
+        get = 0
+        size = frame.shape
+        results = self.faceMesh.process(frame)
+
+        if results.multi_face_landmarks:
+            get = 1
+            ls_single_face = results.multi_face_landmarks[0].landmark
+            for id in face_landmarks_id_mp:
+                cv2.circle(frame, (int(ls_single_face[id].x * size[1]),int(ls_single_face[id].y * size[0])), 6, (255,0,0))
+            #======3D model points
+            model_points = np.array([
+                                (0.0, 0.0, 0.0),             # Nose tip              1
+                                (0.0, -330.0, -65.0),        # Chin                  13
+                                (-225.0, 170.0, -135.0),     # Left eye left corner  130
+                                (225.0, 170.0, -135.0),      # Right eye right corne 359
+                                (-150.0, -150.0, -125.0),    # Left Mouth corner     76 
+                                (150.0, -150.0, -125.0)      # Right mouth corner    306
+                            ])
+
+            #======2D image points
+            image_points = np.array([
+                                (int(ls_single_face[face_landmarks_id_mp[2]].x * size[1]), int(ls_single_face[face_landmarks_id_mp[2]].y * size[0])),     # Nose tip
+                                (int(ls_single_face[face_landmarks_id_mp[5]].x * size[1]), int(ls_single_face[face_landmarks_id_mp[5]].y * size[0])),     # Chin
+                                (int(ls_single_face[face_landmarks_id_mp[0]].x * size[1]), int(ls_single_face[face_landmarks_id_mp[0]].y * size[0])),     # Left eye left corner
+                                (int(ls_single_face[face_landmarks_id_mp[1]].x * size[1]), int(ls_single_face[face_landmarks_id_mp[1]].y * size[0])),     # Right eye right corne
+                                (int(ls_single_face[face_landmarks_id_mp[3]].x * size[1]), int(ls_single_face[face_landmarks_id_mp[3]].y * size[0])),     # Left Mouth corner
+                                (int(ls_single_face[face_landmarks_id_mp[4]].x * size[1]), int(ls_single_face[face_landmarks_id_mp[4]].y * size[0]))      # Right mouth corner
+                                ], dtype="double")
+
+            # Camera internals
+            focal_length = size[1]
+            center = (size[1]/2, size[0]/2)
+            camera_matrix = np.array(
+                                [[focal_length, 0, center[0]],
+                                [0, focal_length, center[1]],
+                                [0, 0, 1]], dtype = "double"
+                                )
+            dist_coeffs = np.zeros((4,1)) # Assuming no lens distortion
+            (success, rotation_vector, translation_vector) = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
+            get = 1
+            return get,rotation_vector, translation_vector, camera_matrix, dist_coeffs, image_points
+        else:
+            return 0,0, 0, 0, 0, 0
+
+
+
+
+
+def main():
+    # ros 節點
+    rospy.init_node("realsense_headpose_pub")
+    pub = rospy.Publisher("realsense_headpose",vision,queue_size=10)
+    rate = rospy.Rate(30)
+
+    while not rospy.is_shutdown():
+        # use mediapipe
+        detector = FaceDetector()
+        landmarkdetector = LandMarkDetector(face_landmarks_id_mp)
+
+        # use drawTable
+        draw_graph = drawTable.draw()
+
+
+        while(True):
+            # ret, depth_frame, frame, depth_color_image = dc.get_frame()
+            ret, depth_frame, color_frame = dc.get_frame()
+            # frame = cv2.cvtColor(color_frame, cv2.COLOR_BGR2RGB)
+            start = time.time() 
+            frame = color_frame
+            raw = frame
+            size = frame.shape
+
+            steady_pose = [0,0,0]
+            
+            frame, bboxs = detector.findFace(frame)
+            distance = 0
+            
+            if bboxs: 
+                # 145~157 取得臉部深度
+                
+                points_x = int(bboxs[0][0][0] + bboxs[0][0][2]/2)
+                points_y = int(bboxs[0][0][1] + bboxs[0][0][3]/2)
+                
+                if points_y < 0 or points_y > size[0]:
+                    continue
+                if points_x < 0 or points_x > size[1]:
+                    continue
+
+                distance = depth_frame[points_y][points_x]
+
+                cv2.circle(frame, (int(bboxs[0][0][0] + bboxs[0][0][2]/2), int(bboxs[0][0][1] + bboxs[0][0][3]/2)), 5, (0, 255, 255), 3)
+                cv2.putText(frame, f'distance: {int(distance)}', (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 1, cv2.LINE_AA)
+
+                # 160～192 landmark
+                get, rotation_vector, translation_vector, camera_matrix, dist_coeffs, image_points = landmarkdetector.findLandMark(frame)
+
+                if get == 1: 
+                    #======axis
+                    # drawAxis.drawAxis(rotation_vector, translation_vector, camera_matrix, dist_coeffs, image_points, frame)
+        
+                    #======get rotation matrix
+                    rmat,_=cv2.Rodrigues(rotation_vector)
+
+                    #======rotation matrix to EulerAngles
+                    angels= rotationMatrixToEulerAngles.rotationMatrixToEulerAngles(rmat)
+
+                    #======get steable angels
+                    steady_pose = []
+                    pose_np = np.array(angels).flatten()
+                
+                    for value, ps_stb in zip(pose_np, stabilizer_parameters.pose_stabilizers):
+                        ps_stb.update([value])
+                        steady_pose.append(ps_stb.state[0])
+                    
+                    steady_pose = np.reshape(steady_pose, (3,))
+
+                    # print("Raw", angels.astype(int))
+                    # print("steady", steady_pose.astype(int))
+                    #======draw rawAngle v.s. steadyAngle
+                    if (drawTableOpen == 0):
+                        draw_graph.display(angels.astype(int), steady_pose.astype(int))
+                
+                    cv2.putText(frame,'pitch:'+str(int(steady_pose[0])),(10, 40),cv2.FONT_HERSHEY_SIMPLEX,1, (0, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(frame,'yaw:'+str(int(angels[1])),(10, 80),cv2.FONT_HERSHEY_SIMPLEX,1, (0, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(frame,'roll:'+str(int(angels[2])),(10, 120),cv2.FONT_HERSHEY_SIMPLEX,1, (0, 255, 255), 1, cv2.LINE_AA)
+                    end = time.time()
+                    # print(format(end-start))
+
+            
+            # cv2.putText(frame, f'FPS: {int(fps)}', (20, 70), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 2)
+            cv2.imshow('live', frame)
+            end = time.time()
+            # print(format(end-start))
+                
+            # press q to leave
+            if cv2.waitKey(1) == ord('q'):
+                cv2.destroyAllWindows()
+                break
+            
+            msg = vision()
+            msg.pitch = int(steady_pose[0])
+            msg.yaw = int(steady_pose[1])
+            msg.roll = int(steady_pose[2])
+            msg.distance = int(distance)
+
+            
+            pub.publish(msg) #发布Topic
+            rate.sleep() #确保Topic以我们设定的频率发布
+
+##-----------------------------------------------------------------------------
+if __name__=='__main__':
+    try:
+        main()
+    except rospy.ROSInterruptException:
+        pass
+
+
+# start = time.time() 
+# end = time.time()
+# print(format(end-start))

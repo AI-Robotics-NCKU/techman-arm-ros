@@ -1,0 +1,25 @@
+範例
+1.在tmflow 建立全域變數 g_fts
+
+2在設定裡的 connection 裡的 ethernet 的 data table 加入 g_fts
+
+3.在/tmdriver_ws/src/tm_msgs/msg/FeedbackState.msg 裡新增
+  float64[] ft_sensor
+  
+4.在/tmdriver_ws/src/tm_driver/include/tm_driver/tm_robot_state.h 裡新增
+  float ft_sensor[6];
+  
+  std::vector<double> ft_sensor(){
+	std::vector<double>  ftsensor;
+	ftsensor.assign(6, 0.0);
+	for (int i = 0; i < 6; ++i) { ftsensor[i] = tmRobotStateDataToPublish.ft_sensor[i]; }
+	return ftsensor; 
+  }
+
+5.在/tmdriver_ws/src/tm_driver/src/tm_robot_state.cpp裡新增
+  _item_map["g_fts"] = { &rs->tmRobotStateDataFromEthernet.ft_sensor};
+           （tm_flow裡全域變數的名字)                        
+
+6.在/tmdriver_ws/src/tm_driver/src/tm_ros_topic.cpp裡新增
+  pm.fbs_msg.ft_sensor = state.ft_sensor();
+ 完成
